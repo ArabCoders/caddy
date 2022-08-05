@@ -145,7 +145,11 @@ type (
 		zones  []string
 		logger *zap.Logger
 	}
-
+	// matchClientIp matches requests by client IP (or CIDR range).
+	// Prefers X-Forwarded-For if the conditions are satisfied.
+	MatchClientIP struct {
+		MatchRemoteIP
+	}
 	// MatchNot matches requests by negating the results of its matcher
 	// sets. A single "not" matcher takes one or more matcher sets. Each
 	// matcher set is OR'ed; in other words, if any matcher set returns
@@ -182,6 +186,7 @@ func init() {
 	caddy.RegisterModule(MatchHeaderRE{})
 	caddy.RegisterModule(new(MatchProtocol))
 	caddy.RegisterModule(MatchRemoteIP{})
+	caddy.RegisterModule(MatchClientIP{})
 	caddy.RegisterModule(MatchNot{})
 }
 
@@ -1216,6 +1221,73 @@ func (m MatchRemoteIP) Match(r *http.Request) bool {
 	return false
 }
 
+// CaddyModule returns the Caddy module information.
+func (MatchClientIP) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.matchers.client_ip",
+		New: func() caddy.Module { return new(MatchClientIP) },
+	}
+}
+
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
+func (m *MatchClientIP) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		m.Forwarded = true
+		for d.NextArg() {
+			if d.Val() == "private_ranges" {
+				m.Ranges = append(m.Ranges, []string{
+					"192.168.0.0/16",
+					"172.16.0.0/12",
+					"10.0.0.0/8",
+					"127.0.0.1/8",
+					"fd00::/8",
+					"::1",
+				}...)
+				continue
+			}
+			m.Ranges = append(m.Ranges, d.Val())
+		}
+		if d.NextBlock(0) {
+			return d.Err("malformed client_ip matcher: blocks are not supported")
+		}
+	}
+	return nil
+}
+
+// CELLibrary produces options that expose this matcher for use in CEL
+// expression matchers.
+//
+// Example:
+//    expression client_ip('192.168.0.0/16', '172.16.0.0/12', '10.0.0.0/8')
+func (MatchClientIP) CELLibrary(ctx caddy.Context) (cel.Library, error) {
+	return CELMatcherImpl(
+		// name of the macro, this is the function name that users see when writing expressions.
+		"client_ip",
+		// name of the function that the macro will be rewritten to call.
+		"client_ip_match_request_list",
+		// internal data type of the MatchPath value.
+		[]*cel.Type{cel.ListType(cel.StringType)},
+		// function to convert a constant list of strings to a MatchPath instance.
+		func(data ref.Val) (RequestMatcher, error) {
+			refStringList := reflect.TypeOf([]string{})
+			strList, err := data.ConvertToNative(refStringList)
+			if err != nil {
+				return nil, err
+			}
+
+			m := MatchClientIP{}
+			m.Forwarded = true
+
+			for _, input := range strList.([]string) {
+				m.Ranges = append(m.Ranges, input)
+			}
+
+			err = m.Provision(ctx)
+			return m, err
+		},
+	)
+}
+
 // MatchRegexp is an embedable type for matching
 // using regular expressions. It adds placeholders
 // to the request's replacer.
@@ -1385,6 +1457,8 @@ var (
 	_ RequestMatcher    = (*MatchProtocol)(nil)
 	_ RequestMatcher    = (*MatchRemoteIP)(nil)
 	_ caddy.Provisioner = (*MatchRemoteIP)(nil)
+	_ RequestMatcher    = (*MatchClientIP)(nil)
+	_ caddy.Provisioner = (*MatchClientIP)(nil)
 	_ RequestMatcher    = (*MatchNot)(nil)
 	_ caddy.Provisioner = (*MatchNot)(nil)
 	_ caddy.Provisioner = (*MatchRegexp)(nil)
@@ -1398,6 +1472,7 @@ var (
 	_ caddyfile.Unmarshaler = (*MatchHeaderRE)(nil)
 	_ caddyfile.Unmarshaler = (*MatchProtocol)(nil)
 	_ caddyfile.Unmarshaler = (*MatchRemoteIP)(nil)
+	_ caddyfile.Unmarshaler = (*MatchClientIP)(nil)
 	_ caddyfile.Unmarshaler = (*VarsMatcher)(nil)
 	_ caddyfile.Unmarshaler = (*MatchVarsRE)(nil)
 
@@ -1410,6 +1485,7 @@ var (
 	_ CELLibraryProducer = (*MatchHeaderRE)(nil)
 	_ CELLibraryProducer = (*MatchProtocol)(nil)
 	_ CELLibraryProducer = (*MatchRemoteIP)(nil)
+	_ CELLibraryProducer = (*MatchClientIP)(nil)
 	// _ CELLibraryProducer = (*VarsMatcher)(nil)
 	// _ CELLibraryProducer = (*MatchVarsRE)(nil)
 
